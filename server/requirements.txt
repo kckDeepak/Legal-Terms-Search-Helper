@@ -1,0 +1,12 @@
+flask
+python-dotenv
+pymysql
+numpy
+sentence-transformers
+langchain
+langchain-community
+langchain-text-splitters
+langchain-chroma
+langchain-huggingface
+transformers
+torch
