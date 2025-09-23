@@ -6,7 +6,8 @@ from sentence_transformers import SentenceTransformer
 import chromadb
 import chromadb.errors
 from transformers import pipeline
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
 
@@ -32,6 +33,7 @@ MYSQL_DB = os.getenv('MYSQL_DB')
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app)  # Enable CORS for React frontend
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['ALLOWED_EXTENSIONS'] = {'txt'}
 
@@ -173,13 +175,7 @@ def generate_answer(query, contexts, sections):
     
     try:
         result = qa_pipeline(question=query, context=context_str)
-        answer = result['answer']
-        relevant_section = sections[0] if sections else "Unknown"
-        for sec, ctx in zip(sections, contexts):
-            if answer in ctx:
-                relevant_section = sec
-                break
-        return f"{answer} (Section {relevant_section})"
+        return result['answer']  # Return only the answer, without section
     except Exception as e:
         print(f"Error generating answer: {e}")
         return "Unable to generate an answer due to an error."
@@ -189,11 +185,6 @@ setup_mysql()
 
 # Global variable to store current collection
 current_collection = None
-
-# Route to serve the frontend
-@app.route('/')
-def serve_frontend():
-    return send_from_directory('static', 'index.html')
 
 # Route for file upload
 @app.route('/upload', methods=['POST'])
@@ -246,8 +237,7 @@ def query_legal_terms():
 
         return jsonify({
             'question': question,
-            'answer': answer,
-            'timestamp': datetime.datetime.now().isoformat()
+            'answer': answer
         })
     except Exception as e:
         print(f"Error processing query: {e}")
