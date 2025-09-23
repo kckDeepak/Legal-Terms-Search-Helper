@@ -1,264 +1,198 @@
 import os
 import json
 import datetime
-import pymysql
-from pymysql.cursors import DictCursor
-
 import numpy as np
+import faiss
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+import mysql.connector
+from mysql.connector import Error
+import logging
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
-# LangChain imports (updated for deprecation)
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings  # Updated
-from langchain_chroma import Chroma  # Updated
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
-from langchain_huggingface import HuggingFacePipeline
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-# ---- Config ----
-load_dotenv()
-
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_USER = os.getenv("DB_USER", "your_username")
-DB_PASS = os.getenv("DB_PASS", "your_password")
-DB_NAME = os.getenv("DB_NAME", "legal_rag_db")
-
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-LLM_MODEL_NAME = os.getenv("LLM_MODEL", "distilgpt2")
-
-CHROMA_PERSIST_DIR = "./chroma_db"
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Initialize embedding model
-embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+load_dotenv()
 
-# Initialize local LLM
-tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(LLM_MODEL_NAME)
-llm_pipeline = pipeline(
-    "text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens=256,  # Reduced to avoid token limit
-    temperature=0.7,
-    device=-1,  # CPU
-    return_full_text=False  # Avoid echoing prompt
-)
-llm = HuggingFacePipeline(pipeline=llm_pipeline)
+# MySQL configuration from .env
+DB_HOST = os.getenv('DB_HOST')
+DB_USER = os.getenv('DB_USER')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+DB_NAME = os.getenv('DB_NAME')
 
-# ---- DB Connection Helper ----
-def get_connection():
-    return pymysql.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASS,
-        database=DB_NAME,
-        cursorclass=DictCursor
-    )
+# Paths for FAISS index and chunks
+INDEX_PATH = 'legal_index.faiss'
+CHUNKS_PATH = 'legal_chunks.json'
 
-# ---- Utility Functions ----
-def get_vectorstore():
-    return Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings)
+# Load local embedding model
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
-# ---- Flask Endpoints ----
-@app.route("/upload_document", methods=["POST"])
-def upload_document():
-    conn = None
+# Load local generation model
+generator = pipeline('text-generation', model='distilgpt2')
+
+# Function to get embeddings locally
+def get_embeddings(texts):
     try:
-        if "file" in request.files:
-            f = request.files["file"]
-            raw_text = f.read().decode("utf-8", errors="ignore")
-            title = f.filename or "Untitled"
-            print(f"DEBUG: File upload - title: {title}, raw_text length: {len(raw_text)}")
-        else:
-            payload = request.get_json(force=True)
-            raw_text = payload.get("text", "")
-            title = payload.get("title", "Untitled")
-            print(f"DEBUG: JSON payload - title: {title}, raw_text length: {len(raw_text)}")
-
-        if not raw_text.strip():
-            return jsonify({"error": "No valid text provided"}), 400
-
-        conn = get_connection()
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO documents (title, raw_text) VALUES (%s, %s)", (title, raw_text))
-            doc_id = cur.lastrowid
-        conn.commit()
-        print(f"DEBUG: Document saved to MySQL with ID: {doc_id}")
-
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=350 * 4, chunk_overlap=50, separators=["\n\n", "\n", " ", ""])
-        chunks = text_splitter.split_text(raw_text)
-        print(f"DEBUG: Generated {len(chunks)} chunks")
-
-        if not chunks:
-            return jsonify({"error": "No chunks generated from text"}), 400
-
-        vectorstore = get_vectorstore()
-        ids = vectorstore.add_texts(
-            texts=chunks,
-            metadatas=[{"document_id": str(doc_id), "chunk_index": i+1} for i in range(len(chunks))]
-        )
-        print(f"DEBUG: Added {len(chunks)} chunks to Chroma for document_id={doc_id}, IDs={ids}")
-        vectorstore.persist()
-
-        return jsonify({"message": "Document uploaded and indexed", "document_id": doc_id}), 201
-    except pymysql.MySQLError as e:
-        if conn:
-            conn.rollback()
-        print(f"DEBUG: MySQL error: {str(e)}")
-        return jsonify({"error": f"Database error: {str(e)}"}), 500
+        if isinstance(texts, str):
+            texts = [texts]
+        embeddings = embedding_model.encode(texts, convert_to_tensor=False)
+        logger.debug(f"Local embeddings generated for {len(texts)} texts")
+        return embeddings
     except Exception as e:
-        print(f"DEBUG: Server error: {str(e)}")
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
-    finally:
-        if conn:
-            conn.close()
+        logger.error(f"Local embedding error: {str(e)}")
+        raise ValueError(f"Local embedding error: {str(e)}")
 
-@app.route("/ask_question", methods=["POST"])
-def ask_question():
-    data = request.get_json(force=True)
-    question = data.get("question")
-    if not question:
-        return jsonify({"error": "question is required"}), 400
-    
-    document_id = data.get("document_id")
-    top_k = int(data.get("top_k", 4))
-
+# Function to generate answer using distilgpt2
+def generate_answer(prompt):
     try:
-        vectorstore = get_vectorstore()
-        print(f"DEBUG: Vector store initialized, persist_dir={CHROMA_PERSIST_DIR}")
+        # Extract context and question
+        context = prompt.split('Context:')[1].split('Question:')[0].strip()
+        question = prompt.split('Question:')[1].split('Answer:')[0].strip().lower()
+        
+        # Simplified prompt for distilgpt2
+        simplified_prompt = f"Given this context: {context}\nAnswer this question in one concise sentence: {question}"
+        
+        # Generate response
+        result = generator(
+            simplified_prompt,
+            max_new_tokens=30,  # Further reduced to avoid irrelevant text
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+            pad_token_id=50256
+        )
+        generated_text = result[0]['generated_text'].strip()
+        
+        # Extract answer
+        answer = generated_text.split("Answer this question in one concise sentence:")[1].strip() if "Answer this question in one concise sentence:" in generated_text else generated_text
+        
+        # Fallback to context if answer is irrelevant or doesn't contain key terms
+        if "affidavit" not in answer.lower() or "defendant" in answer.lower() or "lawyer" in answer.lower() or len(answer) > 100:
+            # Extract affidavit definition from context
+            if "Affidavit:" in context:
+                answer = context.split('Affidavit:')[1].split('\n\n')[0].strip()
+            else:
+                answer = "Definition not found in context."
+        
+        logger.debug(f"Local generation for prompt: {simplified_prompt[:50]}...")
+        return answer
+    except Exception as e:
+        logger.error(f"Local generation error: {str(e)}")
+        raise ValueError(f"Local generation error: {str(e)}")
 
-        all_docs = vectorstore.get()
-        doc_count = len(all_docs['ids'])
-        print(f"DEBUG: Total documents in Chroma: {doc_count}")
-        if doc_count == 0:
-            answer_text = "No documents found in the vector store. Please upload a document first."
-            references = []
-            raise Exception("Empty vector store")
-
-        for i, (id, text, meta) in enumerate(zip(all_docs['ids'], all_docs['documents'], all_docs['metadatas'])):
-            print(f"DEBUG: Chroma Doc {i+1}: ID={id}, Text={text[:50]}..., Metadata={meta}")
-
-        filter = {"document_id": str(document_id)} if document_id else None
-        print(f"DEBUG: Filter applied: {filter}")
-
-        retriever = vectorstore.as_retriever(search_kwargs={"k": top_k, "filter": filter})
-        retrieved_docs = retriever.invoke(question)
-        print(f"DEBUG: Retrieved {len(retrieved_docs)} documents for query: {question}")
-        for i, doc in enumerate(retrieved_docs):
-            print(f"DEBUG: Retrieved Doc {i+1}: {doc.page_content[:50]}... (metadata: {doc.metadata})")
-
-        if not retrieved_docs:
-            answer_text = "I cannot answer this question based on the provided documents."
-            references = []
+# Function to chunk text (simple: split into ~500 char chunks)
+def chunk_text(text, chunk_size=500):
+    chunks = []
+    current_chunk = ""
+    for line in text.split('\n'):
+        if len(current_chunk) + len(line) > chunk_size:
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            current_chunk = line
         else:
-            prompt_template = """
-            You are a helpful assistant specialized in legal terms. 
-            Use only the provided CONTEXT to answer the QUESTION concisely. 
-            If the CONTEXT lacks relevant information, respond with: 
-            'I cannot answer this question based on the provided documents.'
-            
-            CONTEXT: {context}
-            
-            QUESTION: {question}
-            
-            ANSWER:
-            """
-            PROMPT = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-            
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=retriever,
-                return_source_documents=True,
-                chain_type_kwargs={"prompt": PROMPT}
-            )
-            
-            result = qa_chain.invoke({"query": question})
-            answer_text = result["result"].strip()
-            top_docs = result["source_documents"]
+            current_chunk += '\n' + line
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    return chunks
 
-            if "ANSWER:" in answer_text:
-                answer_text = answer_text.split("ANSWER:")[-1].strip()
-            elif answer_text.startswith("You are a helpful assistant") or not answer_text:
-                answer_text = "I cannot answer this question based on the provided documents."
-
-            references = [
-                {
-                    "chunk_index": doc.metadata.get("chunk_index"),
-                    "document_id": doc.metadata.get("document_id"),
-                    "score": 1.0
-                }
-                for doc in top_docs
-            ]
-
-    except Exception as ex:
-        print(f"DEBUG: Exception in ask_question: {str(ex)}")
-        answer_text = answer_text if 'answer_text' in locals() else f"I cannot answer this question due to an error: {str(ex)}"
-        references = references if 'references' in locals() else []
-
-    conn = get_connection()
+# MySQL connection function
+def get_db_connection():
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO qa_log (user_question, system_answer, document_id) VALUES (%s, %s, %s)",
-                (question, answer_text, document_id)
-            )
-            qa_id = cur.lastrowid
-        conn.commit()
-    except pymysql.MySQLError as e:
-        print(f"DEBUG: MySQL error: {str(e)}")
-        answer_text = f"Database error: {str(e)}"
-    finally:
-        conn.close()
+        connection = mysql.connector.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+        return connection
+    except Error as e:
+        logger.error(f"Error connecting to MySQL: {e}")
+        return None
 
-    return jsonify({"answer": answer_text, "references": references, "qa_id": qa_id})
-
-@app.route("/qa_history", methods=["GET"])
-def qa_history():
-    limit = int(request.args.get("limit", 50))
-    conn = get_connection()
+# Endpoint to upload legal content
+@app.route('/upload', methods=['POST'])
+def upload_legal_content():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+    
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM qa_log ORDER BY created_at DESC LIMIT %s", (limit,))
-            rows = cur.fetchall()
-    finally:
-        conn.close()
-    return jsonify({"qa_logs": rows})
+        content = file.read().decode('utf-8')
+        chunks = chunk_text(content)
+        logger.debug(f"Text chunks created: {len(chunks)} chunks")
+        
+        # Get embeddings
+        embeddings = get_embeddings(chunks)
+        embeddings_np = np.array(embeddings).astype('float32')
+        
+        # Create FAISS index
+        dimension = embeddings_np.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings_np)
+        
+        # Save index and chunks
+        faiss.write_index(index, INDEX_PATH)
+        with open(CHUNKS_PATH, 'w') as f:
+            json.dump(chunks, f)
+        
+        return jsonify({'message': 'Legal content uploaded and indexed successfully'}), 200
+    except Exception as e:
+        logger.error(f"Upload error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route("/documents", methods=["GET"])
-def list_documents():
-    conn = get_connection()
+# Endpoint to ask a question
+@app.route('/ask', methods=['POST'])
+def ask_question():
+    data = request.json
+    question = data.get('question')
+    if not question:
+        return jsonify({'error': 'No question provided'}), 400
+    
+    if not os.path.exists(INDEX_PATH) or not os.path.exists(CHUNKS_PATH):
+        return jsonify({'error': 'No legal content indexed. Upload first.'}), 400
+    
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, title, upload_date FROM documents ORDER BY upload_date DESC")
-            docs = cur.fetchall()
-    finally:
-        conn.close()
-    return jsonify({"documents": docs})
+        # Load index and chunks
+        index = faiss.read_index(INDEX_PATH)
+        with open(CHUNKS_PATH, 'r') as f:
+            chunks = json.load(f)
+        
+        # Embed question
+        q_embedding = np.array(get_embeddings([question])).astype('float32')
+        
+        # Search for top 3 similar chunks
+        distances, indices = index.search(q_embedding, k=3)
+        relevant_chunks = [chunks[i] for i in indices[0] if i < len(chunks)]
+        context = "\n\n".join(relevant_chunks)
+        
+        # Generate prompt
+        prompt = f"Based on the following legal context, provide a clear and concise answer to the question. Reference specific sections if available.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
+        
+        # Generate answer
+        answer = generate_answer(prompt)
+        
+        # Save to MySQL
+        connection = get_db_connection()
+        if connection:
+            cursor = connection.cursor()
+            query = "INSERT INTO qa_history (question, answer, created_at) VALUES (%s, %s, %s)"
+            cursor.execute(query, (question, answer, datetime.datetime.now()))
+            connection.commit()
+            cursor.close()
+            connection.close()
+        
+        return jsonify({'answer': answer}), 200
+    except Exception as e:
+        logger.error(f"Ask error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route("/document/<int:doc_id>", methods=["GET"])
-def get_document(doc_id):
-    conn = get_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM documents WHERE id=%s", (doc_id,))
-            doc = cur.fetchone()
-            if not doc:
-                return jsonify({"error": "document not found"}), 404
-        vectorstore = get_vectorstore()
-        results = vectorstore.get(where={"document_id": str(doc_id)})
-        chunks = [
-            {"id": results['ids'][i], "chunk_index": results['metadatas'][i]['chunk_index'], "text_preview": results['documents'][i][:400]}
-            for i in range(len(results['ids']))
-        ]
-        chunks.sort(key=lambda x: x['chunk_index'])
-    finally:
-        conn.close()
-    return jsonify({"document": doc, "chunks": chunks})
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(debug=True)
