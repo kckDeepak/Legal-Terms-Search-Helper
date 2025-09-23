@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Legal Terms Search Helper</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f4f4f9;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        input[type="file"], input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #response {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: #fff;
+        }
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Legal Terms Search Helper</h1>
+    
+    <div class="section">
+        <h2>Upload Legal Document</h2>
+        <input type="file" id="fileInput" accept=".txt">
+        <button onclick="uploadFile()">Upload File</button>
+        <div id="uploadResponse"></div>
+    </div>
+    
+    <div class="section">
+        <h2>Ask a Question</h2>
+        <input type="text" id="questionInput" placeholder="e.g., What is the refund policy?">
+        <button onclick="askQuestion()">Ask Question</button>
+        <div id="response"></div>
+    </div>
+
+    <script>
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const uploadResponse = document.getElementById('uploadResponse');
+            const responseDiv = document.getElementById('response');
+            
+            if (!fileInput.files.length) {
+                uploadResponse.innerHTML = '<p class="error">Please select a .txt file to upload.</p>';
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const result = await response.json();
+                uploadResponse.innerHTML = response.ok
+                    ? `<p>${result.message}</p>`
+                    : `<p class="error">${result.error}</p>`;
+                responseDiv.innerHTML = ''; // Clear previous query responses
+            } catch (error) {
+                uploadResponse.innerHTML = '<p class="error">Error uploading file.</p>';
+                console.error('Upload error:', error);
+            }
+        }
+
+        async function askQuestion() {
+            const questionInput = document.getElementById('questionInput');
+            const responseDiv = document.getElementById('response');
+            const question = questionInput.value.trim();
+
+            if (!question) {
+                responseDiv.innerHTML = '<p class="error">Please enter a question.</p>';
+                return;
+            }
+
+            try {
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ question })
+                });
+                const result = await response.json();
+                responseDiv.innerHTML = response.ok
+                    ? `<p><strong>Question:</strong> ${result.question}</p><p><strong>Answer:</strong> ${result.answer}</p><p><strong>Timestamp:</strong> ${result.timestamp}</p>`
+                    : `<p class="error">${result.error}</p>`;
+            } catch (error) {
+                responseDiv.innerHTML = '<p class="error">Error processing question.</p>';
+                console.error('Query error:', error);
+            }
+        }
+    </script>
+</body>
+</html>

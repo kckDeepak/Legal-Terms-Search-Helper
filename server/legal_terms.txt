@@ -1,0 +1,32 @@
+Legal Terms and Their Meanings
+
+Affidavit:
+An affidavit is a written statement confirmed by oath or affirmation, used as evidence in court. It is voluntarily made by an affiant or deponent under an oath or affirmation administered by a person authorized to do so.
+
+Amicus Curiae:
+Amicus Curiae, meaning 'friend of the court,' refers to a person or organization not a party to a case who offers information, expertise, or insight that has a bearing on the issues in the case, to assist the court in making its decision.
+
+Bail:
+Bail is the temporary release of an accused person awaiting trial, sometimes on the condition that a sum of money be lodged to guarantee their appearance in court. The purpose is to ensure the accused returns for trial without being unnecessarily detained.
+
+Habeas Corpus:
+Habeas Corpus is a legal principle that safeguards individual freedom against arbitrary detention. It allows a person who is detained to seek relief by demanding that the detaining authority bring them before a court to determine if the detention is lawful.
+
+Injunction:
+An injunction is a judicial order that restrains a person from beginning or continuing an action threatening or invading the legal right of another. It may also compel a person to carry out a certain act, such as fulfilling contractual obligations.
+
+Jurisdiction:
+Jurisdiction refers to the official power of a court to make legal decisions and judgments. It can be based on geography, subject matter, or the type of case being heard. Without proper jurisdiction, a court cannot proceed with a case.
+
+Litigation:
+Litigation is the process of taking legal action or resolving disputes through the court system. It involves the steps of filing lawsuits, presenting evidence, and obtaining judgments or settlements.
+
+Precedent:
+Precedent is a legal principle established in a previous case that is either binding on or persuasive for a court when deciding subsequent cases with similar issues or facts. It ensures consistency and predictability in law.
+
+Subpoena:
+A subpoena is a writ issued by a court ordering someone to attend court or produce documents relevant to a case. Failure to comply with a subpoena can result in penalties, including fines or imprisonment.
+
+Tort:
+A tort is a civil wrong, other than a breach of contract, that causes harm or loss to another person. The injured party can seek compensation through a lawsuit. Common examples include negligence, defamation, and trespassing.
+

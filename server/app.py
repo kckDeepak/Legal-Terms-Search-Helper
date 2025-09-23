@@ -1,198 +1,257 @@
 import os
-import json
+import re
 import datetime
-import numpy as np
-import faiss
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 import mysql.connector
-from mysql.connector import Error
-import logging
 from sentence_transformers import SentenceTransformer
+import chromadb
+import chromadb.errors
 from transformers import pipeline
+from flask import Flask, request, jsonify, send_from_directory
+from dotenv import load_dotenv
+from werkzeug.utils import secure_filename
 
-# Set up logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-
+# Load environment variables from .env file
 load_dotenv()
 
-# MySQL configuration from .env
-DB_HOST = os.getenv('DB_HOST')
-DB_USER = os.getenv('DB_USER')
-DB_PASSWORD = os.getenv('DB_PASSWORD')
-DB_NAME = os.getenv('DB_NAME')
+# Configuration
+UPLOAD_FOLDER = 'uploads'
+CHROMA_COLLECTION_NAME = 'legal_docs'
+TOP_K = 5
+EMBEDDING_MODEL = 'all-MiniLM-L6-v2'
+QA_MODEL = 'distilbert-base-uncased-distilled-squad'
 
-# Paths for FAISS index and chunks
-INDEX_PATH = 'legal_index.faiss'
-CHUNKS_PATH = 'legal_chunks.json'
+# Ensure upload folder exists
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-# Load local embedding model
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Load sensitive data from .env
+MYSQL_HOST = os.getenv('MYSQL_HOST')
+MYSQL_USER = os.getenv('MYSQL_USER')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD')
+MYSQL_DB = os.getenv('MYSQL_DB')
 
-# Load local generation model
-generator = pipeline('text-generation', model='distilgpt2')
+# Initialize Flask app
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['ALLOWED_EXTENSIONS'] = {'txt'}
 
-# Function to get embeddings locally
-def get_embeddings(texts):
+# Initialize embedding model
+try:
+    embedder = SentenceTransformer(EMBEDDING_MODEL)
+except Exception as e:
+    print(f"Error loading embedding model: {e}")
+    exit(1)
+
+# Initialize ChromaDB client
+try:
+    chroma_client = chromadb.Client()
+except Exception as e:
+    print(f"Error initializing ChromaDB client: {e}")
+    exit(1)
+
+# Initialize Hugging Face question-answering pipeline
+try:
+    qa_pipeline = pipeline('question-answering', model=QA_MODEL, tokenizer=QA_MODEL)
+except Exception as e:
+    print(f"Error loading QA model: {e}")
+    exit(1)
+
+# Setup MySQL database and table
+def setup_mysql():
     try:
-        if isinstance(texts, str):
-            texts = [texts]
-        embeddings = embedding_model.encode(texts, convert_to_tensor=False)
-        logger.debug(f"Local embeddings generated for {len(texts)} texts")
-        return embeddings
-    except Exception as e:
-        logger.error(f"Local embedding error: {str(e)}")
-        raise ValueError(f"Local embedding error: {str(e)}")
-
-# Function to generate answer using distilgpt2
-def generate_answer(prompt):
-    try:
-        # Extract context and question
-        context = prompt.split('Context:')[1].split('Question:')[0].strip()
-        question = prompt.split('Question:')[1].split('Answer:')[0].strip().lower()
-        
-        # Simplified prompt for distilgpt2
-        simplified_prompt = f"Given this context: {context}\nAnswer this question in one concise sentence: {question}"
-        
-        # Generate response
-        result = generator(
-            simplified_prompt,
-            max_new_tokens=30,  # Further reduced to avoid irrelevant text
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-            pad_token_id=50256
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD
         )
-        generated_text = result[0]['generated_text'].strip()
-        
-        # Extract answer
-        answer = generated_text.split("Answer this question in one concise sentence:")[1].strip() if "Answer this question in one concise sentence:" in generated_text else generated_text
-        
-        # Fallback to context if answer is irrelevant or doesn't contain key terms
-        if "affidavit" not in answer.lower() or "defendant" in answer.lower() or "lawyer" in answer.lower() or len(answer) > 100:
-            # Extract affidavit definition from context
-            if "Affidavit:" in context:
-                answer = context.split('Affidavit:')[1].split('\n\n')[0].strip()
-            else:
-                answer = "Definition not found in context."
-        
-        logger.debug(f"Local generation for prompt: {simplified_prompt[:50]}...")
-        return answer
-    except Exception as e:
-        logger.error(f"Local generation error: {str(e)}")
-        raise ValueError(f"Local generation error: {str(e)}")
+        cursor = conn.cursor()
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {MYSQL_DB}")
+        conn.commit()
+        cursor.close()
+        conn.close()
 
-# Function to chunk text (simple: split into ~500 char chunks)
-def chunk_text(text, chunk_size=500):
-    chunks = []
-    current_chunk = ""
-    for line in text.split('\n'):
-        if len(current_chunk) + len(line) > chunk_size:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = line
-        else:
-            current_chunk += '\n' + line
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    return chunks
-
-# MySQL connection function
-def get_db_connection():
-    try:
-        connection = mysql.connector.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
         )
-        return connection
-    except Error as e:
-        logger.error(f"Error connecting to MySQL: {e}")
-        return None
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS qa_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                timestamp DATETIME NOT NULL
+            )
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as err:
+        print(f"MySQL Error: {err}")
+        exit(1)
 
-# Endpoint to upload legal content
+# Save Q&A to MySQL
+def save_to_mysql(question, answer):
+    try:
+        conn = mysql.connector.connect(
+            host=MYSQL_HOST,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DB
+        )
+        cursor = conn.cursor()
+        timestamp = datetime.datetime.now()
+        cursor.execute(
+            "INSERT INTO qa_history (question, answer, timestamp) VALUES (%s, %s, %s)",
+            (question, answer, timestamp)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as err:
+        print(f"Error saving to MySQL: {err}")
+
+# Check if file extension is allowed
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+# Load and process legal text
+def load_legal_text(file_path):
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+        chunks = [chunk.strip() for chunk in re.split(r'\n\s*\n', text) if chunk.strip()]
+        return chunks
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        raise
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        raise
+
+# Index chunks into ChromaDB
+def index_chunks(chunks):
+    try:
+        # Delete existing collection to ensure fresh indexing
+        try:
+            chroma_client.delete_collection(name=CHROMA_COLLECTION_NAME)
+        except chromadb.errors.NotFoundError:
+            pass
+        collection = chroma_client.create_collection(name=CHROMA_COLLECTION_NAME)
+        
+        embeddings = embedder.encode(chunks)
+        ids = [f"chunk_{i}" for i in range(len(chunks))]
+        metadatas = [{"text": chunk[:200], "section": extract_section(chunk)} for chunk in chunks]
+        collection.add(ids=ids, embeddings=embeddings.tolist(), metadatas=metadatas)
+        return collection
+    except Exception as e:
+        print(f"Error indexing chunks: {e}")
+        raise
+
+# Extract section from chunk
+def extract_section(chunk):
+    match = re.search(r'(Section\s)?(\d+\.\d+)', chunk)
+    return match.group(2) if match else "Unknown"
+
+# Retrieve relevant chunks for a query
+def retrieve_chunks(query, collection, top_k=TOP_K):
+    try:
+        query_embedding = embedder.encode([query]).tolist()
+        results = collection.query(query_embeddings=query_embedding, n_results=top_k)
+        return [meta['text'] for meta in results['metadatas'][0]], [meta['section'] for meta in results['metadatas'][0]]
+    except Exception as e:
+        print(f"Error retrieving chunks: {e}")
+        return [], []
+
+# Generate answer using Hugging Face QA model
+def generate_answer(query, contexts, sections):
+    context_str = " ".join([f"Section {sec}: {ctx}" for ctx, sec in zip(contexts, sections)])
+    if not context_str.strip():
+        return "No relevant information found in the document."
+    
+    try:
+        result = qa_pipeline(question=query, context=context_str)
+        answer = result['answer']
+        relevant_section = sections[0] if sections else "Unknown"
+        for sec, ctx in zip(sections, contexts):
+            if answer in ctx:
+                relevant_section = sec
+                break
+        return f"{answer} (Section {relevant_section})"
+    except Exception as e:
+        print(f"Error generating answer: {e}")
+        return "Unable to generate an answer due to an error."
+
+# Initialize MySQL
+setup_mysql()
+
+# Global variable to store current collection
+current_collection = None
+
+# Route to serve the frontend
+@app.route('/')
+def serve_frontend():
+    return send_from_directory('static', 'index.html')
+
+# Route for file upload
 @app.route('/upload', methods=['POST'])
-def upload_legal_content():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-    
+def upload_file():
+    global current_collection
     try:
-        content = file.read().decode('utf-8')
-        chunks = chunk_text(content)
-        logger.debug(f"Text chunks created: {len(chunks)} chunks")
-        
-        # Get embeddings
-        embeddings = get_embeddings(chunks)
-        embeddings_np = np.array(embeddings).astype('float32')
-        
-        # Create FAISS index
-        dimension = embeddings_np.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(embeddings_np)
-        
-        # Save index and chunks
-        faiss.write_index(index, INDEX_PATH)
-        with open(CHUNKS_PATH, 'w') as f:
-            json.dump(chunks, f)
-        
-        return jsonify({'message': 'Legal content uploaded and indexed successfully'}), 200
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part in the request'}), 400
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(file_path)
+            
+            # Process and index the file
+            chunks = load_legal_text(file_path)
+            current_collection = index_chunks(chunks)
+            
+            # Clean up the uploaded file
+            os.remove(file_path)
+            
+            return jsonify({'message': 'File uploaded and indexed successfully'})
+        else:
+            return jsonify({'error': 'Invalid file type. Only .txt files are allowed'}), 400
     except Exception as e:
-        logger.error(f"Upload error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        print(f"Error processing file upload: {e}")
+        return jsonify({'error': 'Failed to process file'}), 500
 
-# Endpoint to ask a question
-@app.route('/ask', methods=['POST'])
-def ask_question():
-    data = request.json
-    question = data.get('question')
-    if not question:
-        return jsonify({'error': 'No question provided'}), 400
-    
-    if not os.path.exists(INDEX_PATH) or not os.path.exists(CHUNKS_PATH):
-        return jsonify({'error': 'No legal content indexed. Upload first.'}), 400
-    
+# Route for querying legal terms
+@app.route('/query', methods=['POST'])
+def query_legal_terms():
+    global current_collection
     try:
-        # Load index and chunks
-        index = faiss.read_index(INDEX_PATH)
-        with open(CHUNKS_PATH, 'r') as f:
-            chunks = json.load(f)
+        if current_collection is None:
+            return jsonify({'error': 'No document uploaded. Please upload a .txt file first.'}), 400
         
-        # Embed question
-        q_embedding = np.array(get_embeddings([question])).astype('float32')
+        data = request.get_json()
+        if not data or 'question' not in data:
+            return jsonify({'error': 'Missing question in request body'}), 400
         
-        # Search for top 3 similar chunks
-        distances, indices = index.search(q_embedding, k=3)
-        relevant_chunks = [chunks[i] for i in indices[0] if i < len(chunks)]
-        context = "\n\n".join(relevant_chunks)
-        
-        # Generate prompt
-        prompt = f"Based on the following legal context, provide a clear and concise answer to the question. Reference specific sections if available.\n\nContext:\n{context}\n\nQuestion: {question}\n\nAnswer:"
-        
-        # Generate answer
-        answer = generate_answer(prompt)
-        
-        # Save to MySQL
-        connection = get_db_connection()
-        if connection:
-            cursor = connection.cursor()
-            query = "INSERT INTO qa_history (question, answer, created_at) VALUES (%s, %s, %s)"
-            cursor.execute(query, (question, answer, datetime.datetime.now()))
-            connection.commit()
-            cursor.close()
-            connection.close()
-        
-        return jsonify({'answer': answer}), 200
+        question = data['question'].strip()
+        if not question:
+            return jsonify({'error': 'Question cannot be empty'}), 400
+
+        contexts, sections = retrieve_chunks(question, current_collection)
+        answer = generate_answer(question, contexts, sections)
+        save_to_mysql(question, answer)
+
+        return jsonify({
+            'question': question,
+            'answer': answer,
+            'timestamp': datetime.datetime.now().isoformat()
+        })
     except Exception as e:
-        logger.error(f"Ask error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        print(f"Error processing query: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
