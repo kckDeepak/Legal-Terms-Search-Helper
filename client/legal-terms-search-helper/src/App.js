@@ -34,31 +34,59 @@ const App = () => {
       <Box sx={{ minHeight: '100vh', bgcolor: 'background.default', py: 4 }}>
         <Container maxWidth="xl">
           <Paper elevation={6} sx={{ overflow: 'hidden' }}>
+            {/* Header section always visible */}
             <Box sx={{ bgcolor: 'primary.main', p: 4 }}>
               <Typography variant="h1">Legal Terms Search Helper</Typography>
               <Typography variant="body1" sx={{ color: 'white', mt: 1 }}>
                 Upload a .txt legal document and ask questions about it.
               </Typography>
             </Box>
-            
-            <Box sx={{ p: 4 }}>
-              <Grid container spacing={4} sx={{ minHeight: '70vh' }}>
-                {/* Left Panel - File Uploader */}
-                <Grid item xs={12} md={4} sx={{ height: '100%' }}>
-                  <Paper 
-                    elevation={3} 
-                    sx={{ 
-                      height: '100%', 
-                      display: 'flex', 
-                      flexDirection: 'column', 
-                      p: 3,
-                      borderRadius: 2 
-                    }}
-                  >
-                    <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: 'primary.main' }}>
-                      📁 Document Upload
-                    </Typography>
-                    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+
+            {/* Conditional rendering based on file upload status */}
+            <Box sx={{ p: 4, minHeight: '70vh' }}>
+              {isFileUploaded ? (
+                // Layout for when the file is uploaded (full-page chat)
+                <Box
+                  sx={{
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 2,
+                    p: 2,
+                  }}
+                >
+                  <Typography variant="h6" sx={{ fontWeight: 600, color: 'primary.main' }}>
+                    💬 Chat with Document
+                  </Typography>
+                  <Typography variant="body2" color="textSecondary" sx={{ mb: 1 }}>
+                    Uploaded file: <strong>{fileName}</strong>
+                  </Typography>
+                  <Box sx={{ flex: 1, overflow: 'hidden' }}>
+                    <ChatWindow messages={messages} isLoading={isLoading} />
+                  </Box>
+                  <QuestionInput
+                    setMessages={setMessages}
+                    isLoading={isLoading}
+                    setIsLoading={setIsLoading}
+                  />
+                </Box>
+              ) : (
+                // Initial layout for file upload
+                <Grid container spacing={4} sx={{ height: '100%' }}>
+                  <Grid item xs={12} md={6}>
+                    <Paper
+                      elevation={3}
+                      sx={{
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        p: 3,
+                        borderRadius: 2,
+                      }}
+                    >
+                      <Typography variant="h6" sx={{ mb: 2, fontWeight: 600, color: 'primary.main' }}>
+                        📁 Document Upload
+                      </Typography>
                       <FileUploader
                         setIsFileUploaded={setIsFileUploaded}
                         setFileName={setFileName}
@@ -66,83 +94,32 @@ const App = () => {
                         setIsLoading={setIsLoading}
                         isLoading={isLoading}
                       />
-                      {fileName && (
-                        <Box sx={{ mt: 2, pt: 2, borderTop: 1, borderColor: 'divider' }}>
-                          <Typography variant="body2" color="textSecondary" sx={{ mb: 1 }}>
-                            Uploaded file:
-                          </Typography>
-                          <Paper 
-                            sx={{ 
-                              p: 1.5, 
-                              bgcolor: 'success.light', 
-                              display: 'flex', 
-                              alignItems: 'center', 
-                              gap: 1 
-                            }}
-                          >
-                            <Typography variant="body2" fontWeight={500} color="success.dark">
-                              ✅ {fileName}
-                            </Typography>
-                          </Paper>
-                        </Box>
-                      )}
-                    </Box>
-                  </Paper>
-                </Grid>
+                    </Paper>
+                  </Grid>
 
-                {/* Right Panel - Chat Interface */}
-                <Grid item xs={12} md={8} sx={{ height: '100%' }}>
-                  <Paper 
-                    elevation={3} 
-                    sx={{ 
-                      height: '100%', 
-                      display: 'flex', 
-                      flexDirection: 'column',
-                      borderRadius: 2 
-                    }}
-                  >
-                    <Typography variant="h6" sx={{ p: 3, pb: 1, fontWeight: 600, color: 'primary.main' }}>
-                      💬 Chat with Document
-                    </Typography>
-                    
-                    <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                      <Box sx={{ flex: 1, overflow: 'hidden' }}>
-                        <ChatWindow messages={messages} isLoading={isLoading} />
-                      </Box>
-                      
-                      {isFileUploaded ? (
-                        <Box sx={{ p: 3, pt: 0, borderTop: 1, borderColor: 'divider' }}>
-                          <QuestionInput
-                            setMessages={setMessages}
-                            isLoading={isLoading}
-                            setIsLoading={setIsLoading}
-                          />
-                        </Box>
-                      ) : (
-                        <Box 
-                          sx={{ 
-                            flex: 1, 
-                            display: 'flex', 
-                            alignItems: 'center', 
-                            justifyContent: 'center', 
-                            p: 4,
-                            bgcolor: 'grey.50'
-                          }}
-                        >
-                          <Paper elevation={1} sx={{ p: 4, textAlign: 'center', maxWidth: 300 }}>
-                            <Typography variant="h6" color="textSecondary" gutterBottom>
-                              📄 No document loaded
-                            </Typography>
-                            <Typography variant="body2" color="textSecondary">
-                              Upload a .txt file on the left to start asking questions about your document.
-                            </Typography>
-                          </Paper>
-                        </Box>
-                      )}
-                    </Box>
-                  </Paper>
+                  <Grid item xs={12} md={6}>
+                    <Paper
+                      elevation={3}
+                      sx={{
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        borderRadius: 2,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        p: 4,
+                      }}
+                    >
+                      <Typography variant="h6" color="textSecondary" gutterBottom>
+                        📄 No document loaded
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary" align="center">
+                        Upload a .txt file on the left to start asking questions about your document.
+                      </Typography>
+                    </Paper>
+                  </Grid>
                 </Grid>
-              </Grid>
+              )}
             </Box>
           </Paper>
         </Container>
