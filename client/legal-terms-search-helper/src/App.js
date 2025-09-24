@@ -23,6 +23,7 @@ const theme = createTheme({
 
 const App = () => {
   const [isFileUploaded, setIsFileUploaded] = useState(false);
+  const [fileName, setFileName] = useState(''); // New state for file name
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -42,10 +43,16 @@ const App = () => {
             <Box sx={{ p: 4, display: 'flex', flexDirection: 'column', gap: 4 }}>
               <FileUploader
                 setIsFileUploaded={setIsFileUploaded}
+                setFileName={setFileName} // Pass setFileName callback
                 setMessages={setMessages}
                 setIsLoading={setIsLoading}
                 isLoading={isLoading}
               />
+              {fileName && (
+                <Typography variant="body2" color="textSecondary">
+                  Uploaded file: <strong>{fileName}</strong>
+                </Typography>
+              )}
               {isFileUploaded && (
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <ChatWindow messages={messages} isLoading={isLoading} />

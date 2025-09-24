@@ -6,8 +6,9 @@ import toast from 'react-hot-toast';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000';
 
-const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading }) => {
+const FileUploader = ({ setIsFileUploaded, setFileName, setMessages, setIsLoading, isLoading }) => {
   const [backendStatus, setBackendStatus] = useState('unknown');
+  const [uploadAttempted, setUploadAttempted] = useState(false);
 
   const onDrop = useCallback((acceptedFiles) => {
     if (acceptedFiles.length > 0) {
@@ -21,6 +22,7 @@ const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading 
   }, []);
 
   const handleFileUpload = async (file) => {
+    setUploadAttempted(true);
     const formData = new FormData();
     formData.append('file', file);
 
@@ -28,19 +30,22 @@ const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading 
       setIsLoading(true);
       const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 30000, // 30 second timeout
+        timeout: 30000,
       });
       if (response.status === 200) {
         setIsFileUploaded(true);
+        setFileName(file.name);
+        setBackendStatus('healthy');
         toast.success('File uploaded and indexed successfully!');
         setMessages([]);
       }
     } catch (error) {
       console.error('Upload error:', error);
-      
-      if (error.code === 'ERR_NETWORK' || error.message.includes('Network Error') || error.message.includes('ERR_CONNECTION_REFUSED')) {
+      setBackendStatus('unreachable');
+      if (error.response?.status === 404) {
+        toast.error('Upload endpoint not found (404). Please check if the backend /upload route is correctly set up.');
+      } else if (error.code === 'ERR_NETWORK' || error.message.includes('Network Error') || error.message.includes('ERR_CONNECTION_REFUSED')) {
         toast.error(`Cannot connect to backend server at ${API_BASE_URL}. Please ensure the server is running on port 5000.`);
-        setBackendStatus('error');
       } else if (error.response) {
         toast.error(error.response?.data?.error || `Upload failed with status ${error.response.status}`);
       } else {
@@ -51,23 +56,6 @@ const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading 
     }
   };
 
-  // Check backend status on component mount
-  React.useEffect(() => {
-    const checkBackend = async () => {
-      try {
-        const response = await axios.get(`${API_BASE_URL}/health`, { timeout: 5000 });
-        if (response.status === 200) {
-          setBackendStatus('healthy');
-        }
-      } catch (error) {
-        console.error('Backend health check failed:', error);
-        setBackendStatus('unreachable');
-      }
-    };
-
-    checkBackend();
-  }, []);
-
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: { 'text/plain': ['.txt'] },
@@ -77,9 +65,13 @@ const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading 
 
   const renderStatusIndicator = () => {
     if (backendStatus === 'healthy') {
-      return <Alert severity="success" sx={{ mb: 2 }}>Backend server is running ✅</Alert>;
-    } else if (backendStatus === 'unreachable') {
-      return <Alert severity="error" sx={{ mb: 2 }}>Backend server is not reachable at {API_BASE_URL}. Please start your server! ❌</Alert>;
+      return <Alert severity="success" sx={{ mb: 2 }}>File uploaded successfully✅</Alert>;
+    } else if (backendStatus === 'unreachable' && uploadAttempted) {
+      return (
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Backend server is not reachable at {API_BASE_URL}. Please start your server! ❌
+        </Alert>
+      );
     }
     return null;
   };
@@ -115,7 +107,7 @@ const FileUploader = ({ setIsFileUploaded, setMessages, setIsLoading, isLoading 
         )}
         {isLoading && <CircularProgress sx={{ mt: 2 }} />}
       </Paper>
-      {!isLoading && backendStatus === 'unreachable' && (
+      {!isLoading && backendStatus === 'unreachable' && uploadAttempted && (
         <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.100', borderRadius: 1 }}>
           <Typography variant="body2" color="textSecondary">
             <strong>Troubleshooting:</strong>
