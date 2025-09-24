@@ -62,7 +62,7 @@ const QuestionInput = ({ setMessages, isLoading, setIsLoading }) => {
         variant="contained"
         color="primary"
         disabled={isLoading || !question.trim()}
-        sx={{ px: 4, py: 1.5 }}
+        sx={{ px: 4, py: 1.5, minWidth: 80 }}
       >
         {isLoading ? 'Asking...' : 'Ask'}
       </Button>
