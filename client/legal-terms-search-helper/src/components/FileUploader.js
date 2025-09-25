@@ -11,6 +11,7 @@ const FileUploader = ({ setIsFileUploaded, setFileName, setMessages, setIsLoadin
   const [uploadAttempted, setUploadAttempted] = useState(false);
 
   const onDrop = useCallback((acceptedFiles) => {
+    // Only process the first file, as per the single-file requirement
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
       if (file.type === 'text/plain') {
@@ -23,33 +24,69 @@ const FileUploader = ({ setIsFileUploaded, setFileName, setMessages, setIsLoadin
 
   const handleFileUpload = async (file) => {
     setUploadAttempted(true);
-    const formData = new FormData();
-    formData.append('file', file);
+    setIsLoading(true);
 
     try {
-      setIsLoading(true);
-      const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
+      // Primary attempt: Try to upload as a single file with key 'file' (for app.py)
+      const singleFileFormData = new FormData();
+      singleFileFormData.append('file', file);
+
+      const response = await axios.post(`${API_BASE_URL}/upload`, singleFileFormData, {
         headers: { 'Content-Type': 'multipart/form-data' },
         timeout: 30000,
       });
+
+      // If successful, update state and exit
       if (response.status === 200) {
         setIsFileUploaded(true);
         setFileName(file.name);
         setBackendStatus('healthy');
         toast.success('File uploaded and indexed successfully!');
         setMessages([]);
+        return;
       }
     } catch (error) {
-      console.error('Upload error:', error);
-      setBackendStatus('unreachable');
-      if (error.response?.status === 404) {
-        toast.error('Upload endpoint not found (404). Please check if the backend /upload route is correctly set up.');
-      } else if (error.code === 'ERR_NETWORK' || error.message.includes('Network Error') || error.message.includes('ERR_CONNECTION_REFUSED')) {
-        toast.error(`Cannot connect to backend server at ${API_BASE_URL}. Please ensure the server is running on port 5000.`);
-      } else if (error.response) {
-        toast.error(error.response?.data?.error || `Upload failed with status ${error.response.status}`);
+      // If the primary attempt fails, check for a specific error and try the fallback
+      const isSingleFileError = error.response?.status === 400 && 
+                               (error.response.data?.error.includes('No file part') ||
+                                error.response.data?.error.includes('No files selected'));
+      
+      if (isSingleFileError) {
+        console.log('Single-file upload failed. Trying multi-file upload fallback...');
+        
+        try {
+          // Fallback attempt: Upload as a multi-file request (for app_greetings.py)
+          const multiFileFormData = new FormData();
+          multiFileFormData.append('files', file);
+
+          const response = await axios.post(`${API_BASE_URL}/upload`, multiFileFormData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 30000,
+          });
+
+          if (response.status === 200) {
+            setIsFileUploaded(true);
+            setFileName(file.name);
+            setBackendStatus('healthy');
+            toast.success('File uploaded and indexed successfully!');
+            setMessages([]);
+            return;
+          }
+        } catch (fallbackError) {
+          // Handle fallback-specific errors
+          console.error('Fallback upload error:', fallbackError);
+          toast.error(fallbackError.response?.data?.error || 'Failed to upload file. Please try again.');
+        }
       } else {
-        toast.error(error.message || 'Failed to upload file. Please try again.');
+        // Handle non-specific errors (e.g., network issues)
+        console.error('Upload error:', error);
+        if (error.code === 'ERR_NETWORK' || error.message.includes('Network Error')) {
+          toast.error(`Cannot connect to backend server at ${API_BASE_URL}. Please ensure the server is running on port 5000.`);
+        } else if (error.response) {
+          toast.error(error.response?.data?.error || `Upload failed with status ${error.response.status}`);
+        } else {
+          toast.error(error.message || 'Failed to upload file. Please try again.');
+        }
       }
     } finally {
       setIsLoading(false);
@@ -59,7 +96,7 @@ const FileUploader = ({ setIsFileUploaded, setFileName, setMessages, setIsLoadin
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: { 'text/plain': ['.txt'] },
-    multiple: false,
+    multiple: false, // Maintain single-file behavior
     disabled: isLoading,
   });
 
